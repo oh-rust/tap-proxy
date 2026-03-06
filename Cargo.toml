@@ -4,3 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.102"
+clap = { version = "4.5.60", features = ["derive"] }
+colored = "3.1.1"
+rustls-native-certs = "0.8.3"
+tokio = {version = "1.50.0", features=["full"] }
+tokio-rustls = "0.26.4"
+
+[profile.release]
+lto = true          # Link Time Optimization
+codegen-units = 1   # 减少生成单元，提高优化空间
+opt-level = "z"     # "z" 优化体积，"s" 优化大小，默认 "3" 优化速度
