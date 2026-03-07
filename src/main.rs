@@ -6,18 +6,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about)]
 struct Args {
-    #[arg(
-        short,
-        long,
-        value_name = "l",
-        default_value = "127.0.0.1:8085",
-        help = "Listen address"
-    )]
+    #[arg(short, long, default_value = "127.0.0.1:8085", help = "Listen address")]
     pub listen: String,
 
     #[arg(
         short,
-        value_name = "d",
         help = "Destination server address, including hostname and port, e.g. example.com:80"
     )]
     pub dest: String,
@@ -25,11 +18,18 @@ struct Args {
     #[arg(
         short,
         long,
-        value_name = "s",
-        default_value_t = true,
+        default_value_t = false,
         help = "Use TLS when connecting to the destination server"
     )]
     pub tls: bool,
+
+    #[arg(
+        short = 'z',
+        long,
+        default_value_t = true,
+        help = "Strip 'Accept-Encoding' headers to prevent compressed responses"
+    )]
+    pub strip_compression: bool,
 }
 
 impl Args {
@@ -96,7 +96,6 @@ async fn proxy(id: u64, mut client: tokio::net::TcpStream, cfg: Args) -> anyhow:
 
     let (mut cr, mut cw) = client.split();
     let (mut sr, mut sw) = tokio::io::split(upstream);
-    let dynamic_host = cfg.domain();
     let client_to_server = async {
         let mut buf = [0u8; 8192];
         let mut first_packet = true;
@@ -108,7 +107,7 @@ async fn proxy(id: u64, mut client: tokio::net::TcpStream, cfg: Args) -> anyhow:
             let mut data_to_send: Vec<u8> = buf[..n].to_vec();
             if first_packet {
                 first_packet = false;
-                data_to_send = fix_header(&buf[..n], dynamic_host.clone());
+                data_to_send = fix_header(&buf[..n], cfg.clone());
             }
             print_request(id, &data_to_send);
             sw.write_all(&data_to_send).await?;
@@ -143,7 +142,7 @@ static HTTP_METHODS: &[&str] = &[
     "GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT ", "TRACE ",
 ];
 
-fn fix_header(bf: &[u8], domain: String) -> Vec<u8> {
+fn fix_header(bf: &[u8], cfg: Args) -> Vec<u8> {
     let content = String::from_utf8_lossy(bf);
     if !HTTP_METHODS.iter().any(|&m| content.starts_with(m)) {
         return bf.to_vec();
@@ -158,12 +157,25 @@ fn fix_header(bf: &[u8], domain: String) -> Vec<u8> {
     let mut lines: Vec<String> = headers.lines().map(|s| s.to_string()).collect();
     let mut host_found = false;
 
+    let domain = cfg.domain();
+
     // 遍历每一行查找 Host
     for line in lines.iter_mut() {
         if line.to_lowercase().starts_with("host:") {
             *line = format!("Host: {}", domain);
             host_found = true;
             break;
+        }
+    }
+
+    if cfg.strip_compression {
+        for line in lines.iter_mut() {
+            if line.to_lowercase().starts_with("accept-encoding:") {
+                let msg = format!("[DEBUG] [FixHeader] replace ({} --> identity)", line);
+                eprintln!("{}", msg.dimmed());
+                *line = format!("Accept-Encoding: {}", "identity"); //不编码
+                break;
+            }
         }
     }
 
@@ -180,14 +192,26 @@ fn fix_header(bf: &[u8], domain: String) -> Vec<u8> {
 }
 
 fn print_request(client_id: u64, data: &[u8]) {
-    let prefix = format!("{}{} {}", "#".red(), client_id.to_string().red(), "Request:".blue());
+    let prefix = format!(
+        "{}{} {} ({} bytes)",
+        "#".red(),
+        client_id.to_string().red(),
+        "Request:".blue(),
+        data.len()
+    );
     println!("{}", prefix);
 
     print_mixed_data(data);
 }
 
 fn print_response(client_id: u64, data: &[u8]) {
-    let prefix = format!("{}{} {}", "#".red(), client_id.to_string().red(), "Response:".cyan());
+    let prefix = format!(
+        "{}{} {} ({} bytes)",
+        "#".red(),
+        client_id.to_string().red(),
+        "Response:".cyan(),
+        data.len()
+    );
     println!("{}", prefix);
     print_mixed_data(data);
 }

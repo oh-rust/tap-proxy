@@ -28,7 +28,7 @@ HTTP 状态码
 - 支持转发到 **HTTP** 或 **HTTPS**
 - 实时打印 **Request / Response**
 - 无需复杂配置，单命令启动
-- 轻量级 CLI 工具
+- 
 
 ---
 
@@ -47,9 +47,13 @@ Options:
   -l <l>         Listen address [default: 127.0.0.1:8085]
   -d <d>         Destination server address, including hostname and port, e.g. example.com:80
   -t, --tls      Use TLS when connecting to the destination server
+  -z, --strip-compression  Strip 'Accept-Encoding' headers to prevent compressed responses
   -h, --help     Print help
   -V, --version  Print version
 ```
+
+使用 `-z` 参数后，对于 HTTP 请求，会修改 `Header` 中的 `Accept-Encoding` 字段，
+让 Server 返回明文内容（非压缩），以方便在 `tap-proxy` 观察到明文的 `HTTP Response`。
 
 ## 2. HTTP 转发
 启动代理：
