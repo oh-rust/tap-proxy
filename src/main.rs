@@ -6,7 +6,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about)]
 struct Args {
-    #[arg(short, value_name = "l", default_value = "127.0.0.1:8085", help = "Listen address")]
+    #[arg(
+        short,
+        long,
+        value_name = "l",
+        default_value = "127.0.0.1:8085",
+        help = "Listen address"
+    )]
     pub listen: String,
 
     #[arg(
@@ -177,19 +183,111 @@ fn print_request(client_id: u64, data: &[u8]) {
     let prefix = format!("{}{} {}", "#".red(), client_id.to_string().red(), "Request:".blue());
     println!("{}", prefix);
 
-    if let Ok(text) = std::str::from_utf8(data) {
-        println!("{}", text);
-    } else {
-        println!("<{} bytes binary>", data.len());
-    }
+    print_mixed_data(data);
 }
 
 fn print_response(client_id: u64, data: &[u8]) {
     let prefix = format!("{}{} {}", "#".red(), client_id.to_string().red(), "Response:".cyan());
     println!("{}", prefix);
-    if let Ok(text) = std::str::from_utf8(data) {
-        println!("{}", text);
-    } else {
-        println!("<{} bytes binary>", data.len());
+    print_mixed_data(data);
+}
+
+fn print_mixed_data(data: &[u8]) {
+    //  尝试解析 UTF-8
+    match std::str::from_utf8(data) {
+        Ok(text) => {
+            // 全段都是合法的 UTF-8
+            println!("{}", text);
+        }
+        Err(e) => {
+            // 发现非法字符，找到合法的截止位置
+            let valid_len = e.valid_up_to();
+            let (valid_part, binary_part) = data.split_at(valid_len);
+
+            // 打印合法文本部分
+            if !valid_part.is_empty() {
+                let text = String::from_utf8_lossy(valid_part);
+                println!("{}", text.dimmed()); // 用灰色表示这部分已正常解析
+            }
+
+            // 打印剩余的二进制/截断部分
+            println!("{}", "--- Hex View ---".magenta());
+            print_binary(binary_part);
+        }
     }
 }
+
+const CHUNK_SIZE: usize = 120;
+fn print_binary(data: &[u8]) {
+    // 使用 chunks 方法按 120 字节切分
+    for (i, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
+        // 1. 生成 Char 视图 (将不可见字符替换为点，保持位置对应)
+        let char_view: String = chunk
+            .iter()
+            .map(|&b| {
+                if b.is_ascii_graphic() || b == b' ' {
+                    b as char
+                } else {
+                    '?' // 非打印字符统一用?，避免干扰终端排版
+                }
+            })
+            .collect();
+
+        // 2. 生成 Hex 视图
+        let hex_view = chunk.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>();
+
+        // 3. 打印输出
+        // 打印行号偏移量 (Hex 格式)
+        let offset = i * CHUNK_SIZE;
+        println!(
+            "{}",
+            format!("Offset <{},{}> ({} bytes):", offset, offset + chunk.len(), chunk.len()).dimmed()
+        );
+
+        // 打印字符行 (绿色)
+        println!("  {} | {}", "CHR".blue(), char_view.green());
+
+        // 打印 Hex 行 (黄色)
+        for (_i, chunk) in hex_view.chunks(CHUNK_SIZE / 3).enumerate() {
+            println!("  {} | {}", "HEX".blue(), chunk.join(" ").yellow().dimmed());
+        }
+
+        // 行间分割线
+        println!("{}", "-".repeat(CHUNK_SIZE + 8).dimmed());
+    }
+}
+
+// todo: 修改为按照长度截取，每120个字符打印一次，分别打印为 Char 类型和  Hex 类型
+// fn print_binary(data: &[u8]){
+//     // 按换行符 \n 切分，保留换行符在每一行末尾
+//     let lines = data.split_inclusive(|&b| b == b'\n');
+//
+//     for (idx, line) in lines.enumerate() {
+//         // 1. 生成 Lossy 字符串预览
+//         // 将不可见字符（除换行外）替换为点，防止终端控制符乱跳
+//         let mut text_view = String::new();
+//         for &b in line {
+//             if b.is_ascii_graphic() || b == b' ' {
+//                 text_view.push(b as char);
+//             } else if b == b'\n' {
+//                 text_view.push_str("\\n");
+//             } else if b == b'\r' {
+//                 text_view.push_str("\\r");
+//             } else {
+//                 text_view.push('·'); // 不可打印字符用弱化的点表示
+//             }
+//         }
+//
+//         // 2. 生成 Hex 预览
+//         let hex_view: String = line.iter()
+//             .map(|b| format!("{:02x}", b))
+//             .collect::<Vec<String>>()
+//             .join(" ");
+//
+//         // 3. 格式化输出
+//         // 行号用灰色，文本部分用绿色，Hex 部分用黄色
+//         println!("{:>3} | {:<40}",idx.to_string().dimmed(),text_view.green());
+//         println!("{:>3} | {}", idx.to_string().dimmed(),hex_view.yellow().dimmed());
+//     }
+//     println!("{}", "--- End of Data ---".dimmed());
+// }
