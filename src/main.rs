@@ -11,7 +11,8 @@ struct Args {
 
     #[arg(
         short,
-        help = "Destination server address, including hostname and port, e.g. example.com:80"
+        help = "Destination server address, including hostname and port, e.g. example.com:80",
+        value_parser = parse_dest,
     )]
     pub dest: String,
 
@@ -38,12 +39,29 @@ impl Args {
     }
 }
 
+/// 校验函数：检查格式是否为 host:port
+fn parse_dest(s: &str) -> Result<String, String> {
+    let parts: Vec<&str> = s.split(':').collect();
+
+    // 基础检查：必须有且只有一个冒号，且冒号后有内容
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return Err("Expected `hostname:port` (e.g., example.com:80)".to_string());
+    }
+
+    // 端口合法性检查
+    let port = parts[1];
+    let ret = port.parse::<u16>();
+    if ret.is_err() || ret.is_ok() && ret.unwrap() == 0 {
+        return Err(format!("Invalid port number `{}`", port));
+    }
+
+    Ok(s.to_string())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    println!("tap-proxy: ! {:?}", args);
-
-    println!("tap-proxy: connecting to {}", args.domain());
+    println!("tap-proxy:  {:?}", args);
 
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     let mut id: u64 = 0;
@@ -64,32 +82,104 @@ trait AsyncStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send +
 
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> AsyncStream for T {}
 
+use tokio_rustls::rustls;
+use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio_rustls::rustls::{DigitallySignedStruct, SignatureScheme};
+
+#[derive(Debug)]
+struct NoCertificateVerification;
+
+impl ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        // This is the "magic" line that bypasses the check
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        // Support common schemes to ensure compatibility
+        vec![
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ED25519,
+            SignatureScheme::RSA_PKCS1_SHA256,
+        ]
+    }
+}
 async fn connect(cfg: Args) -> anyhow::Result<Box<dyn AsyncStream>> {
     let upstream = tokio::net::TcpStream::connect(cfg.dest.clone()).await?;
     if !cfg.tls {
-        return anyhow::Ok(Box::new(upstream));
-    }
-    let mut root_cert_store = tokio_rustls::rustls::RootCertStore::empty();
-    for cert in rustls_native_certs::load_native_certs().unwrap() {
-        root_cert_store.add(cert)?;
+        return Ok(Box::new(upstream));
     }
 
-    // 配置 TLS 客户端
-    let config = tokio_rustls::rustls::ClientConfig::builder()
-        .with_root_certificates(root_cert_store)
-        .with_no_client_auth(); // 通常客户端不需要提供证书
+    // Set up the TLS config without verification
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+        .with_no_client_auth();
+
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
-    // 将 TcpStream 升级为 TlsStream
-    // 注意：需要将域名转换为 rustls::pki_types::ServerName
     let domain = cfg
-        .domain() // 替换为 cfg.dest 对应的域名
+        .domain()
         .try_into()
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid dnsname"))?;
 
     let tls_stream = connector.connect(domain, upstream).await?;
     Ok(Box::new(tls_stream))
 }
+
+// async fn connect(cfg: Args) -> anyhow::Result<Box<dyn AsyncStream>> {
+//     let upstream = tokio::net::TcpStream::connect(cfg.dest.clone()).await?;
+//     if !cfg.tls {
+//         return anyhow::Ok(Box::new(upstream));
+//     }
+//     let mut root_cert_store = tokio_rustls::rustls::RootCertStore::empty();
+//     for cert in rustls_native_certs::load_native_certs().unwrap() {
+//         root_cert_store.add(cert)?;
+//     }
+
+//     // 配置 TLS 客户端
+//     let config = tokio_rustls::rustls::ClientConfig::builder()
+//         .with_root_certificates(root_cert_store)
+//         .with_no_client_auth(); // 通常客户端不需要提供证书
+//     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+
+//     // 将 TcpStream 升级为 TlsStream
+//     // 注意：需要将域名转换为 rustls::pki_types::ServerName
+//     let domain = cfg
+//         .domain() // 替换为 cfg.dest 对应的域名
+//         .try_into()
+//         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid dnsname"))?;
+
+//     let tls_stream = connector.connect(domain, upstream).await?;
+//     Ok(Box::new(tls_stream))
+// }
 
 const BUFFER_SIZE: usize = 102400; // 100 KB
 
