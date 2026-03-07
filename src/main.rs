@@ -91,13 +91,15 @@ async fn connect(cfg: Args) -> anyhow::Result<Box<dyn AsyncStream>> {
     Ok(Box::new(tls_stream))
 }
 
+const BUFFER_SIZE: usize = 102400; // 100 KB
+
 async fn proxy(id: u64, mut client: tokio::net::TcpStream, cfg: Args) -> anyhow::Result<()> {
     let upstream = connect(cfg.clone()).await?;
 
     let (mut cr, mut cw) = client.split();
     let (mut sr, mut sw) = tokio::io::split(upstream);
     let client_to_server = async {
-        let mut buf = [0u8; 8192];
+        let mut buf = [0u8; BUFFER_SIZE];
         let mut first_packet = true;
         loop {
             let n = cr.read(&mut buf).await?;
@@ -117,7 +119,7 @@ async fn proxy(id: u64, mut client: tokio::net::TcpStream, cfg: Args) -> anyhow:
     };
 
     let server_to_client = async {
-        let mut buf = [0u8; 8192];
+        let mut buf = [0u8; BUFFER_SIZE];
 
         loop {
             let n = sr.read(&mut buf).await?;
