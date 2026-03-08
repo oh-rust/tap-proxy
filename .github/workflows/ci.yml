@@ -1,0 +1,63 @@
+name: Build and Publish
+
+on:
+  push:
+    branches:
+      - master  # 监听 master 分支的推送事件
+
+jobs:
+  build:
+    runs-on: ubuntu-latest  # 在最新版本的 Ubuntu 上运行 CI
+    permissions:
+      contents: write
+
+    steps:
+      # 检出代码
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # 设置 cross (如果需要跨平台构建)
+      - name: Install cross
+        run: |
+          cargo install cross
+
+      - name: Build linux-x86_64-musl
+        run: |
+         cross build --release --target x86_64-unknown-linux-musl --target-dir target/x86_64-musl
+        
+         mkdir -p output || true
+         cp target/x86_64-musl/x86_64-unknown-linux-musl/release/tap-proxy output/tap-proxy-x86_64-linux-musl
+         ls output -l
+      
+      - name: Build linux-aarch64-musl
+        run: |
+         cross build --release --target aarch64-unknown-linux-musl --target-dir target/aarch64-musl
+
+         mkdir -p output || true
+         mv target/aarch64-musl/aarch64-unknown-linux-musl/release/tap-proxy output/tap-proxy-aarch64-linux-musl
+         ls output -l
+
+      # 发布 Nightly Release
+      - name: Publish Nightly Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 删除已有 nightly release（如果存在）
+          gh release delete nightly -y || true
+
+          # 创建或覆盖 nightly release
+          gh release create nightly \
+            output/tap-proxy-x86_64-linux-musl \
+            output/tap-proxy-aarch64-linux-musl \
+            --title "Nightly Release" \
+            --notes "Automatically built from master commit $GITHUB_SHA on $(date -u +'%Y-%m-%d %H:%M:%S UTC')" \
+            --prerelease
