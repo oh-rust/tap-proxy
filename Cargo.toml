@@ -2,6 +2,19 @@
 name = "tap-proxy"
 version = "0.1.0"
 edition = "2024"
+description = """tap-proxy is a lightweight TCP debugging proxy written in Rust.
+It forwards TCP traffic (including HTTP and HTTPS) from a local
+port to a specified upstream server and prints the request and
+response data in real time in the terminal,making it convenient
+for debugging API calls during development.
+
+Your Application  ------>  tap-proxy  ------> Remote Server
+                            ╱    ╲
+              Dump:   Request  +  Response
+
+Site: https://github.com/oh-rust/tap-proxy/
+"""
+authors =["hidu"]
 
 [dependencies]
 anyhow = "1.0.102"
