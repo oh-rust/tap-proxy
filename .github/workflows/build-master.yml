@@ -46,6 +46,14 @@ jobs:
          mv target/aarch64-musl/aarch64-unknown-linux-musl/release/tap-proxy output/tap-proxy-aarch64-linux-musl
          ls output -l
 
+      - name: Build windows-x86_64-gnu
+        run: |
+         cross build --release --target x86_64-pc-windows-gnu --target-dir target/win64
+
+         mkdir -p output || true
+         mv target/win64/x86_64-pc-windows-gnu/release/tap-proxy.exe output/tap-proxy-win64.exe
+         ls output -l
+
       # 发布 Nightly Release
       - name: Publish Nightly Release
         env:
@@ -58,6 +66,7 @@ jobs:
           gh release create nightly \
             output/tap-proxy-x86_64-linux-musl \
             output/tap-proxy-aarch64-linux-musl \
+            output/tap-proxy-win64.exe \
             --title "Nightly Release" \
             --notes "Automatically built from master commit $GITHUB_SHA on $(date -u +'%Y-%m-%d %H:%M:%S UTC')" \
             --prerelease
