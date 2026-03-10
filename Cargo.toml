@@ -21,7 +21,7 @@ anyhow = "1.0.102"
 clap = { version = "4.5.60",default-features = false, features = ["derive","help","std"] }
 colored = "3.1.1"
 #rustls-native-certs = "0.8.3"
-tokio = {version = "1.50.0", features=["net","io-util","macros","rt-multi-thread"] }
+tokio = { version = "1.50.0", features = ["net", "io-util", "macros", "rt-multi-thread", "time"] }
 tokio-rustls = { version = "0.26.4",features = ["logging", "tls12"] }
 
 [profile.release]

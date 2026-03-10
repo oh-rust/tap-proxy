@@ -2,6 +2,7 @@ mod insecure_verifier;
 
 use clap::Parser;
 use colored::*;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -67,19 +68,22 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     let mut id: u64 = 0;
-    let sep = "=".repeat(120).bright_yellow();
     loop {
         id = id + 1;
-        let (client, addr) = listener.accept().await?;
-        println!("{}", sep);
-        println!("{}{} {}", "#".red(), id.to_string().red(), addr.to_string().red());
-        println!("{}", sep);
-        let cfg = args.clone();
-        tokio::spawn(async move {
-            if let Err(e) = proxy(id, client, cfg.clone()).await {
-                eprintln!("connection error: {}", e);
+        match listener.accept().await {
+            Ok((client, addr)) => {
+                let cfg = args.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = proxy(id, client, addr, cfg.clone()).await {
+                        eprintln!("connection error: {}", e);
+                    }
+                });
             }
-        });
+            Err(e) => {
+                eprintln!("accept failed: {}", e);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
     }
 }
 
@@ -87,8 +91,25 @@ trait AsyncStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send +
 
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> AsyncStream for T {}
 
-async fn connect(cfg: Args) -> anyhow::Result<Box<dyn AsyncStream>> {
+async fn connect(id: u64, cfg: Args, local: SocketAddr) -> anyhow::Result<Box<dyn AsyncStream>> {
     let upstream = tokio::net::TcpStream::connect(cfg.dest.clone()).await?;
+    let peer = upstream.peer_addr().unwrap_or_else(|_| "unknown".parse().unwrap());
+
+    {
+        let sep = "=".repeat(120).bright_green();
+        println!("{}", sep);
+        println!(
+            "{}{} {} {} {} ({})",
+            "#".red(),
+            id.to_string().red(),
+            local.to_string().bright_blue(),
+            "---> tap-proxy --->".bright_yellow(),
+            cfg.dest.to_string().bright_green(),
+            peer.to_string().bright_black(),
+        );
+        println!("{}", sep);
+    }
+
     if !cfg.tls {
         return Ok(Box::new(upstream));
     }
@@ -139,10 +160,10 @@ async fn connect(cfg: Args) -> anyhow::Result<Box<dyn AsyncStream>> {
 
 const BUFFER_SIZE: usize = 102400; // 100 KB
 
-async fn proxy(id: u64, mut client: tokio::net::TcpStream, cfg: Args) -> anyhow::Result<()> {
+async fn proxy(id: u64, mut client: tokio::net::TcpStream, local: SocketAddr, cfg: Args) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
 
-    let upstream = connect(cfg.clone()).await?;
+    let upstream = connect(id, cfg.clone(), local).await?;
 
     let (mut cr, mut cw) = client.split();
     let (mut sr, mut sw) = tokio::io::split(upstream);
@@ -276,7 +297,7 @@ fn print_request(client_id: u64, data: &[u8]) {
         "{}{} {} ({} bytes)",
         "#".red(),
         client_id.to_string().red(),
-        "Request:".blue(),
+        "Request:".bright_blue(),
         data.len()
     );
     println!("{}", prefix);
@@ -289,7 +310,7 @@ fn print_response(client_id: u64, data: &[u8]) {
         "{}{} {} ({} bytes)",
         "#".red(),
         client_id.to_string().red(),
-        "Response:".cyan(),
+        "Response:".bright_yellow(),
         data.len()
     );
     println!("{}", prefix);
