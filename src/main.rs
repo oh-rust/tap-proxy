@@ -1,3 +1,5 @@
+mod insecure_verifier;
+
 use clap::Parser;
 use colored::*;
 use std::sync::Arc;
@@ -65,10 +67,13 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     let mut id: u64 = 0;
+    let sep = "=".repeat(120).bright_yellow();
     loop {
         id = id + 1;
         let (client, addr) = listener.accept().await?;
+        println!("{}", sep);
         println!("{}{} {}", "#".red(), id.to_string().red(), addr.to_string().red());
+        println!("{}", sep);
         let cfg = args.clone();
         tokio::spawn(async move {
             if let Err(e) = proxy(id, client, cfg.clone()).await {
@@ -82,55 +87,6 @@ trait AsyncStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send +
 
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> AsyncStream for T {}
 
-use tokio_rustls::rustls;
-use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use tokio_rustls::rustls::{DigitallySignedStruct, SignatureScheme};
-
-#[derive(Debug)]
-struct NoCertificateVerification;
-
-impl ServerCertVerifier for NoCertificateVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        // This is the "magic" line that bypasses the check
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        // Support common schemes to ensure compatibility
-        vec![
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ED25519,
-            SignatureScheme::RSA_PKCS1_SHA256,
-        ]
-    }
-}
 async fn connect(cfg: Args) -> anyhow::Result<Box<dyn AsyncStream>> {
     let upstream = tokio::net::TcpStream::connect(cfg.dest.clone()).await?;
     if !cfg.tls {
@@ -138,9 +94,9 @@ async fn connect(cfg: Args) -> anyhow::Result<Box<dyn AsyncStream>> {
     }
 
     // Set up the TLS config without verification
-    let config = rustls::ClientConfig::builder()
+    let config = tokio_rustls::rustls::ClientConfig::builder()
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+        .with_custom_certificate_verifier(Arc::new(insecure_verifier::NoCertificateVerification))
         .with_no_client_auth();
 
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
@@ -184,6 +140,8 @@ async fn connect(cfg: Args) -> anyhow::Result<Box<dyn AsyncStream>> {
 const BUFFER_SIZE: usize = 102400; // 100 KB
 
 async fn proxy(id: u64, mut client: tokio::net::TcpStream, cfg: Args) -> anyhow::Result<()> {
+    let start = std::time::Instant::now();
+
     let upstream = connect(cfg.clone()).await?;
 
     let (mut cr, mut cw) = client.split();
@@ -227,6 +185,10 @@ async fn proxy(id: u64, mut client: tokio::net::TcpStream, cfg: Args) -> anyhow:
 
     tokio::try_join!(client_to_server, server_to_client)?;
 
+    let elapsed = start.elapsed();
+    let msg = format!("#{} connection closed, elapsed: {:?}", id, elapsed);
+    println!("{}", msg.bright_red());
+
     Ok(())
 }
 
@@ -247,19 +209,33 @@ fn fix_header(bf: &[u8], cfg: Args) -> Vec<u8> {
     }
     let (headers, body) = content.split_at(header_end_idx.unwrap());
     let mut lines: Vec<String> = headers.lines().map(|s| s.to_string()).collect();
-    let mut host_found = false;
 
     let domain = cfg.domain();
-
+    let mut host_found = false;
     // 遍历每一行查找 Host
     for line in lines.iter_mut() {
         if line.to_lowercase().starts_with("host:") {
+            let msg = format!("[DEBUG] [FixHeader] replace ({} --> {})", line, domain);
+            eprintln!("{}", msg.dimmed());
             *line = format!("Host: {}", domain);
             host_found = true;
             break;
         }
     }
 
+    // 禁用 Connection：keep-alive
+    let mut connection_fount = false;
+    for line in lines.iter_mut() {
+        if line.to_lowercase().starts_with("connection:") {
+            let msg = format!("[DEBUG] [FixHeader] replace ({} --> close)", line);
+            eprintln!("{}", msg.dimmed());
+            *line = "Connection: close".to_string();
+            connection_fount = true;
+            break;
+        }
+    }
+
+    // 禁用 gzip
     if cfg.strip_compression {
         for line in lines.iter_mut() {
             if line.to_lowercase().starts_with("accept-encoding:") {
@@ -273,7 +249,19 @@ fn fix_header(bf: &[u8], cfg: Args) -> Vec<u8> {
 
     // 如果没找到 Host 字段，在第一行（请求行）之后插入
     if !host_found && lines.len() > 0 {
-        lines.insert(1, format!("Host: {}", domain));
+        let new_line = format!("Host: {}", domain);
+        lines.insert(1, new_line.clone());
+
+        let msg = format!("[DEBUG] [FixHeader] Append ({})", new_line);
+        eprintln!("{}", msg.dimmed());
+    }
+
+    if !connection_fount && lines.len() > 0 {
+        let new_line = "Connection: close".to_string();
+        lines.insert(1, new_line.clone());
+
+        let msg = format!("[DEBUG] [FixHeader] Append ({})", new_line);
+        eprintln!("{}", msg.dimmed());
     }
 
     // 重新拼接 Request
@@ -372,38 +360,3 @@ fn print_binary(data: &[u8]) {
         println!("{}", "-".repeat(CHUNK_SIZE + 8).dimmed());
     }
 }
-
-// todo: 修改为按照长度截取，每120个字符打印一次，分别打印为 Char 类型和  Hex 类型
-// fn print_binary(data: &[u8]){
-//     // 按换行符 \n 切分，保留换行符在每一行末尾
-//     let lines = data.split_inclusive(|&b| b == b'\n');
-//
-//     for (idx, line) in lines.enumerate() {
-//         // 1. 生成 Lossy 字符串预览
-//         // 将不可见字符（除换行外）替换为点，防止终端控制符乱跳
-//         let mut text_view = String::new();
-//         for &b in line {
-//             if b.is_ascii_graphic() || b == b' ' {
-//                 text_view.push(b as char);
-//             } else if b == b'\n' {
-//                 text_view.push_str("\\n");
-//             } else if b == b'\r' {
-//                 text_view.push_str("\\r");
-//             } else {
-//                 text_view.push('·'); // 不可打印字符用弱化的点表示
-//             }
-//         }
-//
-//         // 2. 生成 Hex 预览
-//         let hex_view: String = line.iter()
-//             .map(|b| format!("{:02x}", b))
-//             .collect::<Vec<String>>()
-//             .join(" ");
-//
-//         // 3. 格式化输出
-//         // 行号用灰色，文本部分用绿色，Hex 部分用黄色
-//         println!("{:>3} | {:<40}",idx.to_string().dimmed(),text_view.green());
-//         println!("{:>3} | {}", idx.to_string().dimmed(),hex_view.yellow().dimmed());
-//     }
-//     println!("{}", "--- End of Data ---".dimmed());
-// }
